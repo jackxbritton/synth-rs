@@ -1,0 +1,23 @@
+{
+    "volume": 1,
+    "global_envelope": {
+        "attack": {
+            "type": "midi",
+            "binding": 94,
+            "initial": 0.2,
+            "min": 0,
+            "max": 16,
+            "curve": "exponential"
+        },
+        "decay": 0.5,
+        "sustain": 0.7,
+        "release": 2
+    },
+    "filter": {
+        "type": "low_pass",
+        "binding": 96,
+        "fc_min": 10,
+        "fc_max": 1000,
+        "curve": "linear"
+    }
+}

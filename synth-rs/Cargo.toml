@@ -1,0 +1,12 @@
+[package]
+name = "synth"
+version = "0.1.0"
+authors = ["jack"]
+edition = "2018"
+
+[dependencies]
+crossbeam-channel = "0.3"
+jack = "0.6"
+notify = "=5.0.0-pre.1"
+serde = { version = "1.0.104", features = ["derive"] }
+serde_json = "1.0.44"

@@ -1,0 +1,8 @@
+{
+    "variables": {},
+    "out": {
+        "shape": "sine",
+        "amplitude": 1,
+        "frequency": 220
+    }
+}
