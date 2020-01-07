@@ -2,6 +2,7 @@ extern crate crossbeam_channel;
 extern crate jack;
 use crossbeam_channel::{bounded, unbounded};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::f64::consts::PI;
@@ -25,15 +26,15 @@ struct EnvelopeModule {
     sustain: ModuleHandle,
     release: ModuleHandle,
 
-    out: f64,
+    out: Cell<f64>,
 }
 
 struct OscillatorModule {
     amplitude: ModuleHandle,
     frequency: ModuleHandle,
-    phase: f64,
+    phase: Cell<f64>,
 
-    out: f64,
+    out: Cell<f64>,
 }
 
 struct Config {
@@ -153,20 +154,21 @@ impl Config {
         for osc in &mut self.sine_oscillators {
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase = (osc.phase + f * dt) % 1.0;
-            osc.out = a * (osc.phase * 2.0 * PI).sin();
+            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
+            osc.out.set(a * (osc.phase.get() * 2.0 * PI).sin());
         }
         for osc in &mut self.sawtooth_oscillators {
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase = (osc.phase + f * dt) % 1.0;
-            osc.out = a * (-1.0 + 2.0 * osc.phase);
+            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
+            osc.out.set(a * (-1.0 + 2.0 * osc.phase.get()));
         }
         for osc in &mut self.square_oscillators {
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase = (osc.phase + f * dt) % 1.0;
-            osc.out = a * if osc.phase < 0.5 { -1.0 } else { 1.0 };
+            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
+            osc.out
+                .set(a * (if osc.phase.get() < 0.5 { -1.0 } else { 1.0 }));
         }
 
         self.get_module_output(self.out)
