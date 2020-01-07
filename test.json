@@ -3,6 +3,6 @@
     "out": {
         "shape": "sine",
         "amplitude": 1,
-        "frequency": 220
+        "frequency": 440
     }
 }

@@ -2,7 +2,7 @@ extern crate crossbeam_channel;
 extern crate jack;
 use crossbeam_channel::{bounded, unbounded};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::f64::consts::PI;
@@ -11,7 +11,16 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-#[derive(Clone, Copy)]
+enum Module {
+    Constant(f64),
+    Envelope(EnvelopeModule),
+    SineOscillator(OscillatorModule),
+    SawtoothOscillator(OscillatorModule),
+    SquareOscillator(OscillatorModule),
+
+    Variable(String),
+}
+
 enum ModuleHandle {
     Constant(f64),
     Envelope(usize),
@@ -26,15 +35,15 @@ struct EnvelopeModule {
     sustain: ModuleHandle,
     release: ModuleHandle,
 
-    out: Cell<f64>,
+    out: f64,
 }
 
 struct OscillatorModule {
     amplitude: ModuleHandle,
     frequency: ModuleHandle,
-    phase: Cell<f64>,
+    phase: f64,
 
-    out: Cell<f64>,
+    out: f64,
 }
 
 struct Config {
@@ -44,10 +53,10 @@ struct Config {
     on: bool,
     time_since_toggle: f64,
 
-    envelopes: Vec<EnvelopeModule>,
-    sine_oscillators: Vec<OscillatorModule>,
-    sawtooth_oscillators: Vec<OscillatorModule>,
-    square_oscillators: Vec<OscillatorModule>,
+    envelopes: RefCell<Vec<EnvelopeModule>>,
+    sine_oscillators: RefCell<Vec<OscillatorModule>>,
+    sawtooth_oscillators: RefCell<Vec<OscillatorModule>>,
+    square_oscillators: RefCell<Vec<OscillatorModule>>,
 
     out: ModuleHandle,
 }
@@ -60,10 +69,10 @@ impl Config {
             frequency: 0.0,
             on: false,
             time_since_toggle: 0.0,
-            envelopes: Vec::new(),
-            sine_oscillators: Vec::new(),
-            sawtooth_oscillators: Vec::new(),
-            square_oscillators: Vec::new(),
+            envelopes: RefCell::new(Vec::new()),
+            sine_oscillators: RefCell::new(Vec::new()),
+            sawtooth_oscillators: RefCell::new(Vec::new()),
+            square_oscillators: RefCell::new(Vec::new()),
             out: ModuleHandle::Constant(0.0),
         };
 
@@ -96,10 +105,48 @@ impl Config {
     ) -> Result<ModuleHandle, Box<dyn Error>> {
         match value {
             serde_json::Value::String(key) => {
-                let child = variables.get(key).ok_or("binga bonga")?;
-                Ok(*child)
+                let variable = variables
+                    .get(key)
+                    .ok_or(format!("unrecognized variable key '{}'", key))?;
+                Ok(*variable)
             }
-            _ => Ok(ModuleHandle::Constant(0.0)),
+            serde_json::Value::Object(object) => {
+                if let (Some(shape), Some(amplitude), Some(frequency)) = (
+                    object.get("shape"),
+                    object.get("amplitude"),
+                    object.get("frequency"),
+                ) {
+                    let shape = match shape {
+                        serde_json::Value::String(shape) => Ok(shape),
+                        _ => Err("key 'shape' in oscillator must be of type string"),
+                    }?;
+                    if shape == "sine" {
+                        self.sine_oscillators.borrow_mut().push(OscillatorModule {
+                            amplitude: self.add_json(variables, amplitude)?,
+                            frequency: self.add_json(variables, frequency)?,
+                            phase: 0.0,
+                            out: 0.0,
+                        });
+                        Ok(ModuleHandle::SineOscillator(
+                            self.sine_oscillators.borrow().len() - 1,
+                        ))
+                    } else {
+                        Err("key 'shape' in oscillator must be 'sine', 'sawtooth', or 'square'")?
+                    }
+                } else {
+                    Err(format!("failed to parse JSON object {:?}", object))?
+                }
+                /*
+                let variables = match value
+                    .get("shape")
+                    .ok_or("top-level key 'variables' not found")?
+                {
+                    serde_json::Value::Object(variables) => Ok(variables),
+                    _ => Err("top-level key 'variables' must be an object"),
+                }?;
+                */
+            }
+            _ => Err(format!("failed to parse JSON value {}", value))?,
         }
     }
 
@@ -138,10 +185,12 @@ impl Config {
     fn get_module_output(&self, handle: ModuleHandle) -> f64 {
         match handle {
             ModuleHandle::Constant(value) => value,
-            ModuleHandle::Envelope(index) => self.envelopes[index].out,
-            ModuleHandle::SineOscillator(index) => self.sine_oscillators[index].out,
-            ModuleHandle::SawtoothOscillator(index) => self.sawtooth_oscillators[index].out,
-            ModuleHandle::SquareOscillator(index) => self.square_oscillators[index].out,
+            ModuleHandle::Envelope(index) => self.envelopes.borrow()[index].out,
+            ModuleHandle::SineOscillator(index) => self.sine_oscillators.borrow()[index].out,
+            ModuleHandle::SawtoothOscillator(index) => {
+                self.sawtooth_oscillators.borrow()[index].out
+            }
+            ModuleHandle::SquareOscillator(index) => self.square_oscillators.borrow()[index].out,
         }
     }
 
@@ -149,27 +198,42 @@ impl Config {
         self.time_since_toggle += dt;
 
         // I'm really fighting the borrow-checker here..
+        // Can I make this better?
 
         // Update modules.
-        for osc in &mut self.sine_oscillators {
+
+        for osc in self.sine_oscillators.borrow_mut().iter_mut() {
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
-            osc.out.set(a * (osc.phase.get() * 2.0 * PI).sin());
+            osc.phase = (osc.phase + f * dt) % 1.0;
+            osc.out = a * (osc.phase * 2.0 * PI).sin();
         }
-        for osc in &mut self.sawtooth_oscillators {
+        /*
+        for index in 0..self.sine_oscillators.len() {
+            let osc = &self.sine_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
-            osc.out.set(a * (-1.0 + 2.0 * osc.phase.get()));
+            let mut_osc = &mut self.sine_oscillators[index];
+            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
+            mut_osc.out = a * (mut_osc.phase * 2.0 * PI).sin();
         }
-        for osc in &mut self.square_oscillators {
+        for index in 0..self.sawtooth_oscillators.len() {
+            let osc = &self.sawtooth_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            osc.phase.set((osc.phase.get() + f * dt) % 1.0);
-            osc.out
-                .set(a * (if osc.phase.get() < 0.5 { -1.0 } else { 1.0 }));
+            let mut_osc = &mut self.sawtooth_oscillators[index];
+            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
+            mut_osc.out = a * (-1.0 + 2.0 * mut_osc.phase).sin();
         }
+        for index in 0..self.square_oscillators.len() {
+            let osc = &self.square_oscillators[index];
+            let a = self.get_module_output(osc.amplitude);
+            let f = self.get_module_output(osc.frequency);
+            let mut_osc = &mut self.square_oscillators[index];
+            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
+            mut_osc.out = a * (if mut_osc.phase < 0.5 { -1.0 } else { 1.0 });
+        }
+        */
 
         self.get_module_output(self.out)
     }
@@ -228,7 +292,7 @@ fn do_paths_refer_to_same_file<P: AsRef<Path>>(a: P, b: P) -> io::Result<bool> {
 fn main() -> Result<(), Box<dyn Error>> {
     // Read config.
     let path = Path::new("test.json");
-    let mut config = read_config_from_file(path)?;
+    let config = read_config_from_file(path)?;
 
     // Open a client and register a port.
     let (client, _status) = jack::Client::new(
