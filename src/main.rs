@@ -14,6 +14,7 @@ use std::time::Duration;
 enum ModuleHandle {
     Constant(f64),
     Envelope(usize),
+    MidiBinding(usize),
     SineOscillator(usize),
     SawtoothOscillator(usize),
     SquareOscillator(usize),
@@ -24,6 +25,14 @@ struct EnvelopeModule {
     decay: ModuleHandle,
     sustain: ModuleHandle,
     release: ModuleHandle,
+
+    out: f64,
+}
+
+struct MidiBindingModule {
+    binding: u8,
+    min: f64,
+    max: f64,
 
     out: f64,
 }
@@ -44,6 +53,7 @@ struct Config {
     time_since_toggle: f64,
 
     envelopes: Vec<EnvelopeModule>,
+    midi_bindings: Vec<MidiBindingModule>,
     sine_oscillators: Vec<OscillatorModule>,
     sawtooth_oscillators: Vec<OscillatorModule>,
     square_oscillators: Vec<OscillatorModule>,
@@ -60,6 +70,7 @@ impl Config {
             on: false,
             time_since_toggle: 0.0,
             envelopes: Vec::new(),
+            midi_bindings: Vec::new(),
             sine_oscillators: Vec::new(),
             sawtooth_oscillators: Vec::new(),
             square_oscillators: Vec::new(),
@@ -95,7 +106,9 @@ impl Config {
     ) -> Result<ModuleHandle, Box<dyn Error>> {
         match value {
             serde_json::Value::Number(number) => {
-                let number = number.as_f64().ok_or(format!("failed to parse '{}' as f64", number))?;
+                let number = number
+                    .as_f64()
+                    .ok_or(format!("failed to parse '{}' as f64", number))?;
                 Ok(ModuleHandle::Constant(number))
             }
             serde_json::Value::String(key) => {
@@ -125,6 +138,30 @@ impl Config {
                         out: 0.0,
                     });
                     Ok(ModuleHandle::Envelope(self.envelopes.len() - 1))
+                } else if let (Some(binding), Some(min), Some(max)) = (
+                    object.get("midi_binding"),
+                    object.get("min"),
+                    object.get("max"),
+                ) {
+                    let binding = binding
+                        .as_i64()
+                        .ok_or(format!("failed to parse '{}' as i64", binding))?;
+                    if binding < u8::min_value() as i64 || binding > u8::max_value() as i64 {
+                        Err("midi_binding is outside range of u8")?
+                    }
+                    let min = min
+                        .as_f64()
+                        .ok_or(format!("failed to parse '{}' as f64", min))?;
+                    let max = max
+                        .as_f64()
+                        .ok_or(format!("failed to parse '{}' as f64", max))?;
+                    self.midi_bindings.push(MidiBindingModule {
+                        binding: binding as u8,
+                        min: min,
+                        max: max,
+                        out: 0.0,
+                    });
+                    Ok(ModuleHandle::MidiBinding(self.midi_bindings.len() - 1))
                 } else if let (Some(shape), Some(amplitude), Some(frequency)) = (
                     object.get("shape"),
                     object.get("amplitude"),
@@ -207,6 +244,17 @@ impl Config {
                 self.on = true;
                 self.time_since_toggle = 0.0;
             }
+            0xb0 => {
+                // It's from a MIDI controller.
+                let key = bytes[1];
+                let value = bytes[2] as f64 / 127.0;
+                self.midi_bindings
+                    .iter_mut()
+                    .find(|binding| binding.binding == key)
+                    .map(|mut binding| {
+                        binding.out = binding.min + (binding.max - binding.min) * value
+                    });
+            }
             _ => (),
         }
     }
@@ -215,6 +263,7 @@ impl Config {
         match handle {
             ModuleHandle::Constant(value) => value,
             ModuleHandle::Envelope(index) => self.envelopes[index].out,
+            ModuleHandle::MidiBinding(index) => self.midi_bindings[index].out,
             ModuleHandle::SineOscillator(index) => self.sine_oscillators[index].out,
             ModuleHandle::SawtoothOscillator(index) => self.sawtooth_oscillators[index].out,
             ModuleHandle::SquareOscillator(index) => self.square_oscillators[index].out,
@@ -228,7 +277,6 @@ impl Config {
         // Can I make this better?
 
         // Update modules.
-
         for index in 0..self.sine_oscillators.len() {
             let osc = &self.sine_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
