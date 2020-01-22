@@ -1,8 +1,35 @@
 {
-    "variables": {},
-    "out": {
-        "shape": "sine",
-        "amplitude": 1,
-        "frequency": "synth"
-    }
+    "variables": {
+        "signal": {
+            "shape": "sine",
+            "amplitude": {
+                "attack": 0.1,
+                "decay": 0.1,
+                "sustain": 0.7,
+                "release": {
+                    "midi_binding": 16,
+                    "min": 0,
+                    "max": 2
+                }
+            },
+            "frequency": "synth"
+        }
+    },
+    "out": [
+        {
+            "filter": "all_pass",
+            "f0": {
+                "midi_binding": 17,
+                "min": 0,
+                "max": 10
+            },
+            "q": {
+                "midi_binding": 18,
+                "min": 0.01,
+                "max": 0.5
+            },
+            "input": "signal"
+        },
+        "signal"
+    ]
 }

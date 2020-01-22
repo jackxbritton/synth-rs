@@ -18,6 +18,12 @@ enum ModuleHandle {
     SineOscillator(usize),
     SawtoothOscillator(usize),
     SquareOscillator(usize),
+    LowPassFilter(usize),
+    HighPassFilter(usize),
+    AllPassFilter(usize),
+    Mixer(usize),
+
+    Synth,
 }
 
 struct EnvelopeModule {
@@ -45,7 +51,31 @@ struct OscillatorModule {
     out: f64,
 }
 
+struct BiquadFilterModule {
+    f0: ModuleHandle,
+    q: ModuleHandle,
+
+    input: ModuleHandle,
+
+    a1: f64,
+    a2: f64,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    s1: f64,
+    s2: f64,
+
+    out: f64,
+}
+
+struct Mixer {
+    children: Vec<ModuleHandle>,
+
+    out: f64,
+}
+
 struct Config {
+
     note: u8,
     velocity: u8,
     frequency: f64,
@@ -57,6 +87,10 @@ struct Config {
     sine_oscillators: Vec<OscillatorModule>,
     sawtooth_oscillators: Vec<OscillatorModule>,
     square_oscillators: Vec<OscillatorModule>,
+    low_pass_filters: Vec<BiquadFilterModule>,
+    high_pass_filters: Vec<BiquadFilterModule>,
+    all_pass_filters: Vec<BiquadFilterModule>,
+    mixers: Vec<Mixer>,
 
     out: ModuleHandle,
 }
@@ -74,6 +108,10 @@ impl Config {
             sine_oscillators: Vec::new(),
             sawtooth_oscillators: Vec::new(),
             square_oscillators: Vec::new(),
+            low_pass_filters: Vec::new(),
+            high_pass_filters: Vec::new(),
+            all_pass_filters: Vec::new(),
+            mixers: Vec::new(),
             out: ModuleHandle::Constant(0.0),
         };
 
@@ -112,10 +150,21 @@ impl Config {
                 Ok(ModuleHandle::Constant(number))
             }
             serde_json::Value::String(key) => {
+                if key == "synth" {
+                    return Ok(ModuleHandle::Synth);
+                }
                 let variable = variables
                     .get(key)
                     .ok_or(format!("unrecognized variable key '{}'", key))?;
                 Ok(*variable)
+            }
+            serde_json::Value::Array(array) => {
+                let mut mixer = Mixer { children: Vec::new(), out: 0.0 };
+                for element in array {
+                    mixer.children.push(self.add_json(variables, element)?);
+                }
+                self.mixers.push(mixer);
+                Ok(ModuleHandle::Mixer(self.mixers.len() - 1))
             }
             serde_json::Value::Object(object) => {
                 if let (Some(attack), Some(decay), Some(sustain), Some(release)) = (
@@ -155,11 +204,12 @@ impl Config {
                     let max = max
                         .as_f64()
                         .ok_or(format!("failed to parse '{}' as f64", max))?;
+                    let default = object.get("default").map(|x| x.as_f64().unwrap_or((min + max) / 2.0)).unwrap_or((min + max) / 2.0);
                     self.midi_bindings.push(MidiBindingModule {
                         binding: binding as u8,
                         min: min,
                         max: max,
-                        out: 0.0,
+                        out: default,
                     });
                     Ok(ModuleHandle::MidiBinding(self.midi_bindings.len() - 1))
                 } else if let (Some(shape), Some(amplitude), Some(frequency)) = (
@@ -207,6 +257,49 @@ impl Config {
                         ))
                     } else {
                         Err("key 'shape' in oscillator must be 'sine', 'sawtooth', or 'square'")?
+                    }
+                } else if let (Some(kind), Some(f0), Some(q), Some(input)) = (
+                    object.get("filter"),
+                    object.get("f0"),
+                    object.get("q"),
+                    object.get("input"),
+                ) {
+
+                    // Biquad filter.
+
+                    let kind = match kind {
+                        serde_json::Value::String(kind) => Ok(kind),
+                        _ => Err("key 'filter' in filter must be 'low_pass', 'high_pass', or 'all_pass'"),
+                    }?;
+                    let (f0, q, input) = (
+                        self.add_json(variables, f0)?,
+                        self.add_json(variables, q)?,
+                        self.add_json(variables, input)?,
+                    );
+                    let filter = BiquadFilterModule {
+                        f0: f0,
+                        q: q,
+                        input: input,
+                        a1: 0.0,
+                        a2: 0.0,
+                        b0: 0.0,
+                        b1: 0.0,
+                        b2: 0.0,
+                        s1: 0.0,
+                        s2: 0.0,
+                        out: 0.0,
+                    };
+                    if kind == "low_pass" {
+                        self.low_pass_filters.push(filter);
+                        Ok(ModuleHandle::LowPassFilter(self.low_pass_filters.len() - 1))
+                    } else if kind == "high_pass" {
+                        self.high_pass_filters.push(filter);
+                        Ok(ModuleHandle::HighPassFilter(self.high_pass_filters.len() - 1))
+                    } else if kind == "all_pass" {
+                        self.all_pass_filters.push(filter);
+                        Ok(ModuleHandle::AllPassFilter(self.all_pass_filters.len() - 1))
+                    } else {
+                        Err("key 'filter' in filter must be 'low_pass', 'high_pass', or 'all_pass'")?
                     }
                 } else {
                     Err(format!("failed to parse JSON object {:?}", object))?
@@ -267,6 +360,12 @@ impl Config {
             ModuleHandle::SineOscillator(index) => self.sine_oscillators[index].out,
             ModuleHandle::SawtoothOscillator(index) => self.sawtooth_oscillators[index].out,
             ModuleHandle::SquareOscillator(index) => self.square_oscillators[index].out,
+            ModuleHandle::LowPassFilter(index) => self.low_pass_filters[index].out,
+            ModuleHandle::HighPassFilter(index) => self.high_pass_filters[index].out,
+            ModuleHandle::AllPassFilter(index) => self.all_pass_filters[index].out,
+            ModuleHandle::Mixer(index) => self.mixers[index].out,
+
+            ModuleHandle::Synth => self.frequency,
         }
     }
 
@@ -281,25 +380,25 @@ impl Config {
             let osc = &self.sine_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            let mut_osc = &mut self.sine_oscillators[index];
-            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
-            mut_osc.out = a * (mut_osc.phase * 2.0 * PI).sin();
+            let osc = &mut self.sine_oscillators[index];
+            osc.phase = (osc.phase + f * dt) % 1.0;
+            osc.out = a * (osc.phase * 2.0 * PI).sin();
         }
         for index in 0..self.sawtooth_oscillators.len() {
             let osc = &self.sawtooth_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            let mut_osc = &mut self.sawtooth_oscillators[index];
-            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
-            mut_osc.out = a * (-1.0 + 2.0 * mut_osc.phase).sin();
+            let osc = &mut self.sawtooth_oscillators[index];
+            osc.phase = (osc.phase + f * dt) % 1.0;
+            osc.out = a * (-1.0 + 2.0 * osc.phase).sin();
         }
         for index in 0..self.square_oscillators.len() {
             let osc = &self.square_oscillators[index];
             let a = self.get_module_output(osc.amplitude);
             let f = self.get_module_output(osc.frequency);
-            let mut_osc = &mut self.square_oscillators[index];
-            mut_osc.phase = (mut_osc.phase + f * dt) % 1.0;
-            mut_osc.out = a * (if mut_osc.phase < 0.5 { -1.0 } else { 1.0 });
+            let osc = &mut self.square_oscillators[index];
+            osc.phase = (osc.phase + f * dt) % 1.0;
+            osc.out = a * (if osc.phase < 0.5 { -1.0 } else { 1.0 });
         }
         for index in 0..self.envelopes.len() {
             let env = &self.envelopes[index];
@@ -310,8 +409,8 @@ impl Config {
                 self.get_module_output(env.sustain),
                 self.get_module_output(env.release),
             );
-            let mut_env = &mut self.envelopes[index];
-            mut_env.out = if self.on {
+            let env = &mut self.envelopes[index];
+            env.out = if self.on {
                 if t < a {
                     if a == 0.0 {
                         1.0
@@ -328,16 +427,94 @@ impl Config {
                     s
                 }
             } else {
-                if t < r {
+                if t >= r {
                     0.0
                 } else {
                     if r == 0.0 {
                         0.0
                     } else {
-                        s * t / r
+                        s * (1.0 - t / r)
                     }
                 }
             };
+        }
+        for index in 0..self.low_pass_filters.len() {
+
+            let filter = &self.low_pass_filters[index];
+            let f0 = self.get_module_output(filter.f0);
+            let q = self.get_module_output(filter.q);
+            let input = self.get_module_output(filter.input);
+            let filter = &mut self.low_pass_filters[index];
+
+            let w0 = 2.0 * PI * f0 * dt as f64;
+            let c = w0.cos();
+            let s = w0.sin();
+            let a = s / (2.0 * q);
+            let a0 = 1.0 + a;
+            filter.a1 = -2.0 * c / a0;
+            filter.a2 = (1.0 - a) / a0;
+            filter.b0 = (1.0 - c) / 2.0 / a0;
+            filter.b1 = (1.0 - c) / a0;
+            filter.b2 = (1.0 - c) / 2.0 / a0;
+
+            filter.out = input * filter.b0 + filter.s1;
+            filter.s1 = input * filter.b1 + filter.out * filter.a1 + filter.s2;
+            filter.s2 = input * filter.b2 - filter.out * filter.a2;
+        }
+        for index in 0..self.high_pass_filters.len() {
+
+            let filter = &self.high_pass_filters[index];
+            let f0 = self.get_module_output(filter.f0);
+            let q = self.get_module_output(filter.q);
+            let input = self.get_module_output(filter.input);
+            let filter = &mut self.high_pass_filters[index];
+
+            let w0 = 2.0 * PI * f0 * dt as f64;
+            let c = w0.cos();
+            let s = w0.sin();
+            let a = s / (2.0 * q);
+            let a0 = 1.0 + a;
+            filter.a1 = -2.0 * c / a0;
+            filter.a2 = (1.0 - a) / a0;
+            filter.b0 = (1.0 - c) / 2.0 / a0;
+            filter.b1 = (-1.0 - c) / a0;
+            filter.b2 = (1.0 + c) / 2.0 / a0;
+
+            filter.out = input * filter.b0 + filter.s1;
+            filter.s1 = input * filter.b1 + filter.out * filter.a1 + filter.s2;
+            filter.s2 = input * filter.b2 - filter.out * filter.a2;
+        }
+        for index in 0..self.all_pass_filters.len() {
+
+            let filter = &self.all_pass_filters[index];
+            let f0 = self.get_module_output(filter.f0);
+            let q = self.get_module_output(filter.q);
+            let input = self.get_module_output(filter.input);
+            let filter = &mut self.all_pass_filters[index];
+
+            let w0 = 2.0 * PI * f0 * dt as f64;
+            let c = w0.cos();
+            let s = w0.sin();
+            let a = s / (2.0 * q);
+            let a0 = 1.0 + a;
+            filter.a1 = -2.0 * c / a0;
+            filter.a2 = (1.0 - a) / a0;
+            filter.b0 = (1.0 - a) / a0;
+            filter.b1 = -2.0 * c / a0;
+            filter.b2 = (1.0 - a) / a0;
+
+            filter.out = input * filter.b0 + filter.s1;
+            filter.s1 = input * filter.b1 + filter.out * filter.a1 + filter.s2;
+            filter.s2 = input * filter.b2 - filter.out * filter.a2;
+        }
+        for index in 0..self.mixers.len() {
+
+            let mut sum = 0.0;
+            for child in &self.mixers[index].children {
+                sum += self.get_module_output(*child);
+            }
+            self.mixers[index].out = sum;
+
         }
 
         self.get_module_output(self.out)
@@ -405,7 +582,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Watch the config file for changes.
     let (watcher_tx, watcher_rx) = unbounded();
-    let mut watcher: RecommendedWatcher = Watcher::new(watcher_tx, Duration::from_secs(2))?;
+    let mut watcher: RecommendedWatcher = Watcher::new(watcher_tx, Duration::from_secs(1))?;
     watcher.watch(".", RecursiveMode::NonRecursive)?;
 
     // In this thread, watch the config file for changes and the changes to the audio thread.
