@@ -62,36 +62,51 @@ impl BiquadFilterModule {
         let c = w0.cos();
         let s = w0.sin();
         let a = s / (2.0 * q);
+        let b0 = (1.0 - c) / 2.0;
+        let b1 = 1.0 - c;
+        let b2 = (1.0 - c) / 2.0;
         let a0 = 1.0 + a;
-        self.a1 = -2.0 * c / a0;
-        self.a2 = (1.0 - a) / a0;
-        self.b0 = (1.0 - c) / 2.0 / a0;
-        self.b1 = (1.0 - c) / a0;
-        self.b2 = (1.0 - c) / 2.0 / a0;
+        let a1 = -2.0 * c;
+        let a2 = 1.0 - a;
+        self.b0 = b0 / a0;
+        self.b1 = b1 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = a1 / a0;
+        self.a2 = a2 / a0;
     }
     fn high_pass(&mut self, dt: f64, f0: f64, q: f64) {
         let w0 = 2.0 * PI * f0 * dt as f64;
         let c = w0.cos();
         let s = w0.sin();
         let a = s / (2.0 * q);
+        let b0 = (1.0 + c) / 2.0;
+        let b1 = -1.0 - c;
+        let b2 = (1.0 + c) / 2.0;
         let a0 = 1.0 + a;
-        self.a1 = -2.0 * c / a0;
-        self.a2 = (1.0 - a) / a0;
-        self.b0 = (1.0 - c) / 2.0 / a0;
-        self.b1 = (-1.0 - c) / a0;
-        self.b2 = (1.0 + c) / 2.0 / a0;
+        let a1 = -2.0 * c;
+        let a2 = 1.0 - a;
+        self.b0 = b0 / a0;
+        self.b1 = b1 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = a1 / a0;
+        self.a2 = a2 / a0;
     }
     fn all_pass(&mut self, dt: f64, f0: f64, q: f64) {
         let w0 = 2.0 * PI * f0 * dt as f64;
         let c = w0.cos();
         let s = w0.sin();
         let a = s / (2.0 * q);
+        let b0 = 1.0 - a;
+        let b1 = -2.0 * c;
+        let b2 = 1.0 + a;
         let a0 = 1.0 + a;
-        self.a1 = -2.0 * c / a0;
-        self.a2 = (1.0 - a) / a0;
-        self.b0 = (1.0 - a) / a0;
-        self.b1 = -2.0 * c / a0;
-        self.b2 = (1.0 - a) / a0;
+        let a1 = -2.0 * c;
+        let a2 = 1.0 - a;
+        self.b0 = b0 / a0;
+        self.b1 = b1 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = a1 / a0;
+        self.a2 = a2 / a0;
     }
 }
 
@@ -493,7 +508,7 @@ impl Config {
             self.nodes[filter.output] = filter.step(input);
         }
         for mixer in &mut self.mixers {
-            // The borrow checker stops me from running: mixer.children.iter().map(|child| self.nodes[*child]).sum();
+            // The borrow checker won't let me run: mixer.children.iter().map(|child| self.nodes[*child]).sum();
             let mut sum = 0.0;
             for child in &mixer.children {
                 sum += self.nodes[*child];
@@ -545,7 +560,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut current_sample: usize = 0;
         let out = output_port.as_mut_slice(ps);
-        let len = out.len();
 
         // Process MIDI while writing the output.
         for event in input_port.iter(ps) {
@@ -557,7 +571,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Write the remainder of the output.
-        for v in &mut out[current_sample..len] {
+        for v in &mut out[current_sample..] {
             *v = config.step(dt) as f32;
         }
 
