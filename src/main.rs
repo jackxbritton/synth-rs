@@ -17,20 +17,20 @@ struct EnvelopeModule {
     decay: NodeHandle,
     sustain: NodeHandle,
     release: NodeHandle,
-    out: NodeHandle,
+    output: NodeHandle,
 }
 
 struct MidiBindingModule {
     binding: u8,
     min: f64,
     max: f64,
-    out: NodeHandle,
+    output: NodeHandle,
 }
 
 struct OscillatorModule {
     amplitude: NodeHandle,
     frequency: NodeHandle,
-    out: NodeHandle,
+    output: NodeHandle,
 
     phase: f64,
 }
@@ -39,7 +39,7 @@ struct BiquadFilterModule {
     f0: NodeHandle,
     q: NodeHandle,
     input: NodeHandle,
-    out: NodeHandle,
+    output: NodeHandle,
 
     a1: f64,
     a2: f64,
@@ -50,9 +50,60 @@ struct BiquadFilterModule {
     s2: f64,
 }
 
+impl BiquadFilterModule {
+    fn step(&mut self, input: f64) -> f64 {
+        let out = input * self.b0 + self.s1;
+        self.s1 = input * self.b1 + out * self.a1 + self.s2;
+        self.s2 = input * self.b2 - out * self.a2;
+        out
+    }
+    fn low_pass(&mut self, dt: f64, f0: f64, q: f64) {
+        let w0 = 2.0 * PI * f0 * dt as f64;
+        let c = w0.cos();
+        let s = w0.sin();
+        let a = s / (2.0 * q);
+        let a0 = 1.0 + a;
+        self.a1 = -2.0 * c / a0;
+        self.a2 = (1.0 - a) / a0;
+        self.b0 = (1.0 - c) / 2.0 / a0;
+        self.b1 = (1.0 - c) / a0;
+        self.b2 = (1.0 - c) / 2.0 / a0;
+    }
+    fn high_pass(&mut self, dt: f64, f0: f64, q: f64) {
+        let w0 = 2.0 * PI * f0 * dt as f64;
+        let c = w0.cos();
+        let s = w0.sin();
+        let a = s / (2.0 * q);
+        let a0 = 1.0 + a;
+        self.a1 = -2.0 * c / a0;
+        self.a2 = (1.0 - a) / a0;
+        self.b0 = (1.0 - c) / 2.0 / a0;
+        self.b1 = (-1.0 - c) / a0;
+        self.b2 = (1.0 + c) / 2.0 / a0;
+    }
+    fn all_pass(&mut self, dt: f64, f0: f64, q: f64) {
+        let w0 = 2.0 * PI * f0 * dt as f64;
+        let c = w0.cos();
+        let s = w0.sin();
+        let a = s / (2.0 * q);
+        let a0 = 1.0 + a;
+        self.a1 = -2.0 * c / a0;
+        self.a2 = (1.0 - a) / a0;
+        self.b0 = (1.0 - a) / a0;
+        self.b1 = -2.0 * c / a0;
+        self.b2 = (1.0 - a) / a0;
+    }
+}
+
 struct Mixer {
     children: Vec<NodeHandle>,
-    out: NodeHandle,
+    output: NodeHandle,
+}
+
+struct Gain {
+    gain: NodeHandle,
+    input: NodeHandle,
+    output: NodeHandle,
 }
 
 struct Config {
@@ -72,6 +123,7 @@ struct Config {
     high_pass_filters: Vec<BiquadFilterModule>,
     all_pass_filters: Vec<BiquadFilterModule>,
     mixers: Vec<Mixer>,
+    gains: Vec<Gain>,
 }
 
 impl Config {
@@ -82,7 +134,6 @@ impl Config {
             frequency: 0.0,
             on: false,
             time_since_toggle: 0.0,
-            // nodes: Vec::new(),
             nodes: vec![0.0], // TODO 0 is the synth node (for now).
             envelopes: Vec::new(),
             midi_bindings: Vec::new(),
@@ -93,6 +144,7 @@ impl Config {
             high_pass_filters: Vec::new(),
             all_pass_filters: Vec::new(),
             mixers: Vec::new(),
+            gains: Vec::new(),
         };
 
         let variables = match value
@@ -103,18 +155,23 @@ impl Config {
             _ => Err("top-level key 'variables' must be an object"),
         }?;
         let empty_map = HashMap::new();
-        let variables_map = variables
+        let variables_map: Result<HashMap<_, _>, _> = variables
             .iter()
             .map(|(key, value)| match config.add_json(&empty_map, &value) {
                 Ok(handle) => Ok((key.clone(), handle)),
                 Err(err) => Err(err),
             })
-            .collect::<Result<HashMap<_, _>, Box<dyn Error>>>()?;
+            .collect();
 
         let out = value.get("out").ok_or("top-level 'key' out not found")?;
-        let out_index = config.add_json(&variables_map, &out)?; // TODO Output node ends up on top.
+        config.add_json(&variables_map?, &out)?; // TODO Output node ends up on top.
 
         Ok(config)
+    }
+
+    fn add_node(&mut self, value: f64) -> NodeHandle {
+        self.nodes.push(value);
+        self.nodes.len() - 1
     }
 
     fn add_json(
@@ -127,12 +184,11 @@ impl Config {
                 let number = number
                     .as_f64()
                     .ok_or(format!("failed to parse '{}' as f64", number))?;
-                self.nodes.push(number);
-                Ok(self.nodes.len() - 1)
+                Ok(self.add_node(number))
             }
             serde_json::Value::String(key) => {
                 if key == "synth" {
-                    return Ok(0); // TODO 0 is the synth node for now.
+                    return Ok(0); // TODO The 0 node is the synth (for now, at least).
                 }
                 let variable = variables
                     .get(key)
@@ -140,18 +196,15 @@ impl Config {
                 Ok(*variable)
             }
             serde_json::Value::Array(array) => {
-                // TODO Rewrite this functionally.
-                let mut mixer = Mixer {
-                    children: Vec::new(),
-                    out: 0,
-                };
-                for element in array {
-                    mixer.children.push(self.add_json(variables, element)?);
-                }
-                self.nodes.push(0.0);
-                let out = self.nodes.len() - 1;
-                mixer.out = out;
-                self.mixers.push(mixer);
+                let children: Result<Vec<_>, _> = array
+                    .iter()
+                    .map(|element| self.add_json(variables, element))
+                    .collect();
+                let out = self.add_node(0.0);
+                self.mixers.push(Mixer {
+                    children: children?,
+                    output: out,
+                });
                 Ok(out)
             }
             serde_json::Value::Object(object) => {
@@ -167,14 +220,13 @@ impl Config {
                         self.add_json(variables, sustain)?,
                         self.add_json(variables, release)?,
                     );
-                    self.nodes.push(0.0);
-                    let out = self.nodes.len() - 1;
+                    let out = self.add_node(0.0);
                     self.envelopes.push(EnvelopeModule {
                         attack: attack,
                         decay: decay,
                         sustain: sustain,
                         release: release,
-                        out: out,
+                        output: out,
                     });
                     Ok(out)
                 } else if let (Some(binding), Some(min), Some(max)) = (
@@ -198,13 +250,12 @@ impl Config {
                         .get("default")
                         .map(|x| x.as_f64().unwrap_or((min + max) / 2.0))
                         .unwrap_or((min + max) / 2.0);
-                    self.nodes.push(default);
-                    let out = self.nodes.len() - 1;
+                    let out = self.add_node(default);
                     self.midi_bindings.push(MidiBindingModule {
                         binding: binding as u8,
                         min: min,
                         max: max,
-                        out: out,
+                        output: out,
                     });
                     Ok(out)
                 } else if let (Some(shape), Some(amplitude), Some(frequency)) = (
@@ -220,28 +271,27 @@ impl Config {
                         self.add_json(variables, amplitude)?,
                         self.add_json(variables, frequency)?,
                     );
-                    self.nodes.push(0.0);
-                    let out = self.nodes.len() - 1;
+                    let out = self.add_node(0.0);
                     if shape == "sine" {
                         self.sine_oscillators.push(OscillatorModule {
                             amplitude: amplitude,
                             frequency: frequency,
                             phase: 0.0,
-                            out: out,
+                            output: out,
                         });
                     } else if shape == "sawtooth" {
                         self.sawtooth_oscillators.push(OscillatorModule {
                             amplitude: amplitude,
                             frequency: frequency,
                             phase: 0.0,
-                            out: out,
+                            output: out,
                         });
                     } else if shape == "square" {
                         self.square_oscillators.push(OscillatorModule {
                             amplitude: amplitude,
                             frequency: frequency,
                             phase: 0.0,
-                            out: out,
+                            output: out,
                         });
                     } else {
                         Err("key 'shape' in oscillator must be 'sine', 'sawtooth', or 'square'")?
@@ -266,13 +316,12 @@ impl Config {
                         self.add_json(variables, q)?,
                         self.add_json(variables, input)?,
                     );
-                    self.nodes.push(0.0);
-                    let out = self.nodes.len() - 1;
+                    let out = self.add_node(0.0);
                     let filter = BiquadFilterModule {
                         f0: f0,
                         q: q,
                         input: input,
-                        out: out,
+                        output: out,
                         a1: 0.0,
                         a2: 0.0,
                         b0: 0.0,
@@ -295,6 +344,19 @@ impl Config {
                             "key 'filter' in filter must be 'low_pass', 'high_pass', or 'all_pass'",
                         )?
                     }
+                } else if let (Some(gain), Some(input)) = (object.get("gain"), object.get("input"))
+                {
+                    let (gain, input) = (
+                        self.add_json(variables, gain)?,
+                        self.add_json(variables, input)?,
+                    );
+                    let output = self.add_node(0.0);
+                    self.gains.push(Gain {
+                        gain: gain,
+                        input: input,
+                        output: output,
+                    });
+                    Ok(output)
                 } else {
                     Err(format!("failed to parse JSON object {:?}", object))?
                 }
@@ -342,7 +404,7 @@ impl Config {
                     .iter()
                     .find(|binding| binding.binding == key)
                 {
-                    self.nodes[binding.out] = binding.min + (binding.max - binding.min) * value
+                    self.nodes[binding.output] = binding.min + (binding.max - binding.min) * value
                 }
             }
             _ => (),
@@ -352,36 +414,26 @@ impl Config {
     fn step(&mut self, dt: f64) -> f64 {
         self.time_since_toggle += dt;
 
-        // I'm really fighting the borrow-checker here..
-        // Can I make this better?
-
         // Update modules.
-        for index in 0..self.sine_oscillators.len() {
-            let osc = &self.sine_oscillators[index];
+        for osc in &mut self.sine_oscillators {
             let a = self.nodes[osc.amplitude];
             let f = self.nodes[osc.frequency];
-            let osc = &mut self.sine_oscillators[index];
             osc.phase = (osc.phase + f * dt) % 1.0;
-            self.nodes[osc.out] = a * (osc.phase * 2.0 * PI).sin();
+            self.nodes[osc.output] = a * (osc.phase * 2.0 * PI).sin();
         }
-        for index in 0..self.sawtooth_oscillators.len() {
-            let osc = &self.sawtooth_oscillators[index];
+        for osc in &mut self.sawtooth_oscillators {
             let a = self.nodes[osc.amplitude];
             let f = self.nodes[osc.frequency];
-            let osc = &mut self.sawtooth_oscillators[index];
             osc.phase = (osc.phase + f * dt) % 1.0;
-            self.nodes[osc.out] = a * (-1.0 + 2.0 * osc.phase).sin();
+            self.nodes[osc.output] = a * (-1.0 + 2.0 * osc.phase).sin();
         }
-        for index in 0..self.square_oscillators.len() {
-            let osc = &self.square_oscillators[index];
+        for osc in &mut self.square_oscillators {
             let a = self.nodes[osc.amplitude];
             let f = self.nodes[osc.frequency];
-            let osc = &mut self.square_oscillators[index];
             osc.phase = (osc.phase + f * dt) % 1.0;
-            self.nodes[osc.out] = a * (if osc.phase < 0.5 { -1.0 } else { 1.0 });
+            self.nodes[osc.output] = a * (if osc.phase < 0.5 { -1.0 } else { 1.0 });
         }
-        for index in 0..self.envelopes.len() {
-            let env = &self.envelopes[index];
+        for env in &mut self.envelopes {
             let t = self.time_since_toggle;
             let (a, d, s, r) = (
                 self.nodes[env.attack],
@@ -389,8 +441,7 @@ impl Config {
                 self.nodes[env.sustain],
                 self.nodes[env.release],
             );
-            let env = &mut self.envelopes[index];
-            self.nodes[env.out] = if self.on {
+            self.nodes[env.output] = if self.on {
                 if t < a {
                     if a == 0.0 {
                         1.0
@@ -418,84 +469,42 @@ impl Config {
                 }
             };
         }
-        for index in 0..self.low_pass_filters.len() {
-            let filter = &self.low_pass_filters[index];
+        // TODO Add link to resource used to generate these.
+        // TODO Add filter caching - computing these each time is expensive.
+        for filter in &mut self.low_pass_filters {
             let f0 = self.nodes[filter.f0];
             let q = self.nodes[filter.q];
             let input = self.nodes[filter.input];
-            let filter = &mut self.low_pass_filters[index];
-
-            let w0 = 2.0 * PI * f0 * dt as f64;
-            let c = w0.cos();
-            let s = w0.sin();
-            let a = s / (2.0 * q);
-            let a0 = 1.0 + a;
-            filter.a1 = -2.0 * c / a0;
-            filter.a2 = (1.0 - a) / a0;
-            filter.b0 = (1.0 - c) / 2.0 / a0;
-            filter.b1 = (1.0 - c) / a0;
-            filter.b2 = (1.0 - c) / 2.0 / a0;
-
-            let out = input * filter.b0 + filter.s1;
-            self.nodes[filter.out] = out;
-            filter.s1 = input * filter.b1 + out * filter.a1 + filter.s2;
-            filter.s2 = input * filter.b2 - out * filter.a2;
+            filter.low_pass(dt, f0, q);
+            self.nodes[filter.output] = filter.step(input);
         }
-        for index in 0..self.high_pass_filters.len() {
-            let filter = &self.high_pass_filters[index];
+        for filter in &mut self.high_pass_filters {
             let f0 = self.nodes[filter.f0];
             let q = self.nodes[filter.q];
             let input = self.nodes[filter.input];
-            let filter = &mut self.high_pass_filters[index];
-
-            let w0 = 2.0 * PI * f0 * dt as f64;
-            let c = w0.cos();
-            let s = w0.sin();
-            let a = s / (2.0 * q);
-            let a0 = 1.0 + a;
-            filter.a1 = -2.0 * c / a0;
-            filter.a2 = (1.0 - a) / a0;
-            filter.b0 = (1.0 - c) / 2.0 / a0;
-            filter.b1 = (-1.0 - c) / a0;
-            filter.b2 = (1.0 + c) / 2.0 / a0;
-
-            let out = input * filter.b0 + filter.s1;
-            self.nodes[filter.out] = out;
-            filter.s1 = input * filter.b1 + out * filter.a1 + filter.s2;
-            filter.s2 = input * filter.b2 - out * filter.a2;
+            filter.high_pass(dt, f0, q);
+            self.nodes[filter.output] = filter.step(input);
         }
-        for index in 0..self.all_pass_filters.len() {
-            let filter = &self.all_pass_filters[index];
+        for filter in &mut self.all_pass_filters {
             let f0 = self.nodes[filter.f0];
             let q = self.nodes[filter.q];
             let input = self.nodes[filter.input];
-            let filter = &mut self.all_pass_filters[index];
-
-            let w0 = 2.0 * PI * f0 * dt as f64;
-            let c = w0.cos();
-            let s = w0.sin();
-            let a = s / (2.0 * q);
-            let a0 = 1.0 + a;
-            filter.a1 = -2.0 * c / a0;
-            filter.a2 = (1.0 - a) / a0;
-            filter.b0 = (1.0 - a) / a0;
-            filter.b1 = -2.0 * c / a0;
-            filter.b2 = (1.0 - a) / a0;
-
-            let out = input * filter.b0 + filter.s1;
-            self.nodes[filter.out] = out;
-            filter.s1 = input * filter.b1 + out * filter.a1 + filter.s2;
-            filter.s2 = input * filter.b2 - out * filter.a2;
+            filter.all_pass(dt, f0, q);
+            self.nodes[filter.output] = filter.step(input);
         }
-        for index in 0..self.mixers.len() {
+        for mixer in &mut self.mixers {
+            // The borrow checker stops me from running: mixer.children.iter().map(|child| self.nodes[*child]).sum();
             let mut sum = 0.0;
-            for child in &self.mixers[index].children {
+            for child in &mixer.children {
                 sum += self.nodes[*child];
             }
-            self.nodes[self.mixers[index].out] = sum;
+            self.nodes[mixer.output] = sum;
+        }
+        for gain in &self.gains {
+            self.nodes[gain.output] = self.nodes[gain.input] * self.nodes[gain.gain];
         }
 
-        self.nodes[self.nodes.len() - 1] // TODO
+        self.nodes[self.nodes.len() - 1] // The output node is just the top one.
     }
 }
 
